@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-Real-time Face Recognition using MediaPipe
-Works with both single-person and multi-person models
-"""
 import argparse
 import pickle
 import sys
@@ -22,74 +18,67 @@ mp_drawing_styles = mp.solutions.drawing_styles
 # Paths
 ROOT = Path(__file__).resolve().parent
 MODELS_DIR = ROOT / "models"
-MODEL_PATH = MODELS_DIR / "face_recognition_model.pkl"
-ENCODER_PATH = MODELS_DIR / "label_encoder.pkl"
+MODEL_PATH = MODELS_DIR / "lbph_face_model.pkl"
+LABEL_MAP_PATH = MODELS_DIR / "lbph_label_map.pkl"
 
 # CLI
-ap = argparse.ArgumentParser(description="MediaPipe Face Recognition")
+ap = argparse.ArgumentParser(description="MediaPipe + LBPH Face Recognition")
 ap.add_argument("--camera", type=int, default=0, help="Camera index")
 ap.add_argument("--image", type=str, help="Run on single image instead of webcam")
 ap.add_argument("--confidence", type=float, default=0.7, 
                 help="Min detection confidence (0-1)")
-ap.add_argument("--threshold", type=float, default=0.5,
-                help="Recognition probability threshold for multi-person (0-1)")
+ap.add_argument("--threshold", type=float, default=70.0,
+                help="LBPH confidence threshold (lower=stricter, default: 70)")
+ap.add_argument("--show-mesh", action="store_true",
+                help="Show MediaPipe face mesh overlay")
 args = ap.parse_args()
 
-# Load model
+# Load models
 if not MODEL_PATH.exists():
-    sys.exit(f"[ERROR] Model not found: {MODEL_PATH}\nRun: python 03_train_model.py")
-if not ENCODER_PATH.exists():
-    sys.exit(f"[ERROR] Encoder not found: {ENCODER_PATH}")
+    sys.exit(f"[ERROR] Model not found: {MODEL_PATH}\nRun: python train_lbph_model.py")
+if not LABEL_MAP_PATH.exists():
+    sys.exit(f"[ERROR] Label map not found: {LABEL_MAP_PATH}")
 
-print("[INFO] Loading model...")
-with open(MODEL_PATH, 'rb') as f:
-    model_data = pickle.load(f)
+print("[INFO] Loading LBPH model...")
+recognizer = cv2.face.LBPHFaceRecognizer_create()
+recognizer.read(str(MODEL_PATH))
 
-# Handle both old and new model formats
-if isinstance(model_data, dict):
-    model = model_data['model']
-    mode = model_data.get('mode', 'multi_person')
-else:
-    model = model_data
-    mode = 'multi_person'
+print("[INFO] Loading label mapping...")
+with open(LABEL_MAP_PATH, 'rb') as f:
+    label_map = pickle.load(f)
 
-print("[INFO] Loading label encoder...")
-with open(ENCODER_PATH, 'rb') as f:
-    label_encoder = pickle.load(f)
+# Create reverse mapping (label_id -> name)
+reverse_map = {v: k for k, v in label_map.items()}
 
-print(f"[INFO] Mode: {mode.upper().replace('_', ' ')}")
-print(f"[INFO] Classes: {', '.join(label_encoder.classes_)}")
+print(f"[INFO] Algorithm: LBPH (Local Binary Patterns Histograms)")
+print(f"[INFO] Recognized people: {', '.join(sorted(label_map.keys()))}")
+print(f"[INFO] Confidence threshold: {args.threshold:.1f}")
 
-def get_embedding(face_img):
-    """Generate embedding from face (same as training)"""
-    face_resized = cv2.resize(face_img, (160, 160))
-    gray = cv2.cvtColor(face_resized, cv2.COLOR_BGR2GRAY) if len(face_resized.shape) == 3 else face_resized
+def recognize_face(face_img):
+    """
+    Recognize face using LBPH
+    Returns: (name, confidence, is_recognized)
+    """
+    # Convert to grayscale
+    gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY) if len(face_img.shape) == 3 else face_img
     
-    # Histogram features
-    hist = cv2.calcHist([gray], [0], None, [32], [0, 256]).flatten()
+    # Resize to training size
+    gray_resized = cv2.resize(gray, (160, 160))
     
-    # Spatial features
-    grid_size = 4
-    h, w = gray.shape
-    cell_h, cell_w = h // grid_size, w // grid_size
-    spatial_features = []
-    for i in range(grid_size):
-        for j in range(grid_size):
-            cell = gray[i*cell_h:(i+1)*cell_h, j*cell_w:(j+1)*cell_w]
-            spatial_features.append(cell.mean())
-            spatial_features.append(cell.std())
+    # Predict
+    label_id, confidence = recognizer.predict(gray_resized)
     
-    embedding = np.concatenate([hist, spatial_features])
-    
-    if len(embedding) < 128:
-        embedding = np.pad(embedding, (0, 128 - len(embedding)), 'constant')
+    # LBPH confidence: lower values = better match
+    if confidence < args.threshold:
+        name = reverse_map.get(label_id, "Unknown")
+        is_recognized = True
     else:
-        embedding = embedding[:128]
+        name = "Unknown"
+        is_recognized = False
     
-    embedding = embedding / (np.linalg.norm(embedding) + 1e-7)
-    return embedding
+    return name, confidence, is_recognized
 
-def recognize_faces(frame, face_detection, face_mesh, show_confidence=True):
+def recognize_faces(frame, face_detection, face_mesh, show_mesh=True):
     """Detect and recognize faces in frame with MediaPipe mesh visualization"""
     frame_h, frame_w = frame.shape[:2]
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -97,13 +86,15 @@ def recognize_faces(frame, face_detection, face_mesh, show_confidence=True):
     # Face detection
     detection_results = face_detection.process(rgb_frame)
     
-    # Face mesh
-    mesh_results = face_mesh.process(rgb_frame)
+    # Face mesh (if enabled)
+    mesh_results = None
+    if show_mesh:
+        mesh_results = face_mesh.process(rgb_frame)
     
     recognized_count = 0
     
     # Draw MediaPipe Face Mesh first (background)
-    if mesh_results.multi_face_landmarks:
+    if show_mesh and mesh_results and mesh_results.multi_face_landmarks:
         for face_landmarks in mesh_results.multi_face_landmarks:
             # Draw tesselation
             mp_drawing.draw_landmarks(
@@ -131,6 +122,13 @@ def recognize_faces(frame, face_detection, face_mesh, show_confidence=True):
             w = int(bboxC.width * frame_w)
             h = int(bboxC.height * frame_h)
             
+            # Add padding for better recognition
+            padding = 20
+            x = max(0, x - padding)
+            y = max(0, y - padding)
+            w = min(frame_w - x, w + 2 * padding)
+            h = min(frame_h - y, h + 2 * padding)
+            
             # Ensure valid crop
             if w <= 0 or h <= 0:
                 continue
@@ -143,47 +141,21 @@ def recognize_faces(frame, face_detection, face_mesh, show_confidence=True):
                 continue
             
             try:
-                # Generate embedding
-                embedding = get_embedding(face)
-                embedding = embedding.reshape(1, -1)
+                # Recognize face using LBPH
+                name, confidence, is_recognized = recognize_face(face)
                 
-                # Predict based on mode
-                if mode == 'single_person':
-                    # One-Class SVM: +1 = match, -1 = unknown
-                    prediction = model.predict(embedding)[0]
-                    
-                    if prediction == 1:
-                        name = label_encoder.classes_[0]
-                        confidence = 0.95  # High confidence for match
-                        color = (0, 255, 0)
-                        recognized_count += 1
-                    else:
-                        name = "Unknown"
-                        confidence = 0.0
-                        color = (0, 165, 255)
-                
-                else:  # multi_person mode
-                    # Multi-class SVM
-                    proba = model.predict_proba(embedding)[0]
-                    max_proba = proba.max()
-                    pred_idx = proba.argmax()
-                    confidence = max_proba
-                    
-                    if max_proba >= args.threshold:
-                        name = label_encoder.classes_[pred_idx]
-                        color = (0, 255, 0)
-                        recognized_count += 1
-                    else:
-                        name = "Unknown"
-                        color = (0, 165, 255)
+                # Choose color based on recognition
+                if is_recognized:
+                    color = (0, 255, 0)  # Green for recognized
+                    recognized_count += 1
+                else:
+                    color = (0, 165, 255)  # Orange for unknown
                 
                 # Draw rectangle
                 cv2.rectangle(frame, (x, y), (x2, y2), color, 2)
                 
                 # Draw label background
-                label = f"{name}"
-                if show_confidence:
-                    label += f" ({confidence*100:.1f}%)"
+                label = f"{name} ({confidence:.1f})"
                 
                 (label_w, label_h), baseline = cv2.getTextSize(
                     label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
@@ -222,13 +194,14 @@ if args.image:
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
     ) as face_mesh:
-        result, count = recognize_faces(frame, face_detection, face_mesh)
+        result, count = recognize_faces(frame, face_detection, face_mesh, show_mesh=args.show_mesh)
     
     cv2.putText(result, f"Recognized: {count}", (10, 30),
                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
     
-    cv2.imshow(f"Recognition - {img_path.name}", result)
+    cv2.imshow(f"LBPH Recognition - {img_path.name}", result)
     print(f"[INFO] Recognized {count} face(s)")
+    print("[INFO] Press any key to close...")
     cv2.waitKey(0)
     cv2.destroyAllWindows()
     sys.exit(0)
@@ -241,11 +214,13 @@ if not cap.isOpened():
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
+print("\n" + "="*60)
 print("[INFO] Starting webcam recognition...")
 print(f"[INFO] Detection confidence: {args.confidence}")
-if mode == 'multi_person':
-    print(f"[INFO] Recognition threshold: {args.threshold}")
+print(f"[INFO] Recognition threshold: {args.threshold:.1f} (lower = stricter)")
+print(f"[INFO] Face mesh overlay: {'Enabled' if args.show_mesh else 'Disabled'}")
 print("[INFO] Press 'q' to quit")
+print("="*60 + "\n")
 
 with mp_face_detection.FaceDetection(
     model_selection=1,
@@ -270,7 +245,7 @@ with mp_face_detection.FaceDetection(
         frame = cv2.flip(frame, 1)
         
         # Recognize faces
-        result, count = recognize_faces(frame, face_detection, face_mesh, show_confidence=True)
+        result, count = recognize_faces(frame, face_detection, face_mesh, show_mesh=args.show_mesh)
         
         # Calculate FPS
         curr_time = time.time()
@@ -283,16 +258,15 @@ with mp_face_detection.FaceDetection(
         cv2.rectangle(overlay, (0, 0), (frame_w, 45), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, result, 0.4, 0, result)
         
-        mode_display = "Verification" if mode == 'single_person' else "Recognition"
-        hud = f"MediaPipe {mode_display} | Detected: {count}  |  FPS: {fps:.1f}  |  'q' to quit"
+        hud = f"LBPH Recognition | Detected: {count}  |  FPS: {fps:.1f}  |  'q' to quit"
         cv2.putText(result, hud, (10, 28),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
         
-        # Add MediaPipe branding
-        cv2.putText(result, "MediaPipe", (frame_w - 140, 28),
+        # Add algorithm branding
+        cv2.putText(result, "MediaPipe+LBPH", (frame_w - 180, 28),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2, cv2.LINE_AA)
         
-        cv2.imshow("MediaPipe Face Recognition", result)
+        cv2.imshow("MediaPipe + LBPH Face Recognition", result)
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break

@@ -1,7 +1,7 @@
 # MEDIAPIPE Face Recognition
 
 ## Pipeline Overview
-1️⃣ **Create Dataset** – Detect, crop, and save face images  
+1️⃣ **Create Dataset** – Detect a face, and save face images  
 2️⃣ **Review Dataset** – Delete poor or blurred images  
 3️⃣ **Train Model** – Learn local texture patterns with LBPH  
 4️⃣ **Recognize Faces** – Predict names from live webcam input  
