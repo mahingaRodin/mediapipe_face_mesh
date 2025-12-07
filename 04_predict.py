@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+"""
+Real-time Face Recognition using MediaPipe + LBPH
+MediaPipe: Face detection and mesh visualization
+LBPH: Face recognition algorithm
+"""
 import argparse
 import pickle
 import sys
@@ -18,15 +23,15 @@ mp_drawing_styles = mp.solutions.drawing_styles
 # Paths
 ROOT = Path(__file__).resolve().parent
 MODELS_DIR = ROOT / "models"
-MODEL_PATH = MODELS_DIR / "lbph_face_model.pkl"
+MODEL_PATH = MODELS_DIR / "lbph_face_model.yml"
 LABEL_MAP_PATH = MODELS_DIR / "lbph_label_map.pkl"
 
 # CLI
 ap = argparse.ArgumentParser(description="MediaPipe + LBPH Face Recognition")
 ap.add_argument("--camera", type=int, default=0, help="Camera index")
-ap.add_argument("--image", type=str, help="Run on single image instead of webcam")
+ap.add_argument("--image", type=str, help="Run on single image")
 ap.add_argument("--confidence", type=float, default=0.7, 
-                help="Min detection confidence (0-1)")
+                help="Min MediaPipe detection confidence (0-1)")
 ap.add_argument("--threshold", type=float, default=70.0,
                 help="LBPH confidence threshold (lower=stricter, default: 70)")
 ap.add_argument("--show-mesh", action="store_true",
@@ -35,7 +40,7 @@ args = ap.parse_args()
 
 # Load models
 if not MODEL_PATH.exists():
-    sys.exit(f"[ERROR] Model not found: {MODEL_PATH}\nRun: python train_lbph_model.py")
+    sys.exit(f"[ERROR] Model not found: {MODEL_PATH}\nRun: python 03_train_model_lbph_mediapipe.py")
 if not LABEL_MAP_PATH.exists():
     sys.exit(f"[ERROR] Label map not found: {LABEL_MAP_PATH}")
 
@@ -50,53 +55,54 @@ with open(LABEL_MAP_PATH, 'rb') as f:
 # Create reverse mapping (label_id -> name)
 reverse_map = {v: k for k, v in label_map.items()}
 
-print(f"[INFO] Algorithm: LBPH (Local Binary Patterns Histograms)")
+print(f"[INFO] Technology: MediaPipe (detection) + LBPH (recognition)")
 print(f"[INFO] Recognized people: {', '.join(sorted(label_map.keys()))}")
-print(f"[INFO] Confidence threshold: {args.threshold:.1f}")
+print(f"[INFO] LBPH threshold: {args.threshold:.1f} (lower=stricter)")
 
 def recognize_face(face_img):
-    """
-    Recognize face using LBPH
-    Returns: (name, confidence, is_recognized)
-    """
-    # Convert to grayscale
-    gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY) if len(face_img.shape) == 3 else face_img
-    
-    # Resize to training size
-    gray_resized = cv2.resize(gray, (160, 160))
-    
-    # Predict
-    label_id, confidence = recognizer.predict(gray_resized)
-    
-    # LBPH confidence: lower values = better match
-    if confidence < args.threshold:
-        name = reverse_map.get(label_id, "Unknown")
-        is_recognized = True
-    else:
-        name = "Unknown"
-        is_recognized = False
-    
-    return name, confidence, is_recognized
+    """Recognize face using LBPH"""
+    try:
+        # Convert to grayscale
+        gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY) if len(face_img.shape) == 3 else face_img
+        
+        # Resize to training size
+        gray_resized = cv2.resize(gray, (160, 160))
+        
+        # Predict
+        label_id, confidence = recognizer.predict(gray_resized)
+        
+        # LBPH confidence: lower values = better match
+        if confidence < args.threshold:
+            name = reverse_map.get(label_id, "Unknown")
+            is_recognized = True
+        else:
+            name = "Unknown"
+            is_recognized = False
+        
+        return name, confidence, is_recognized
+    except Exception as e:
+        print(f"[ERROR] Recognition failed: {e}")
+        return "Error", 999, False
 
 def recognize_faces(frame, face_detection, face_mesh, show_mesh=True):
-    """Detect and recognize faces in frame with MediaPipe mesh visualization"""
+    """Detect and recognize faces with MediaPipe + LBPH"""
     frame_h, frame_w = frame.shape[:2]
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     
-    # Face detection
+    # MediaPipe face detection
     detection_results = face_detection.process(rgb_frame)
     
-    # Face mesh (if enabled)
+    # MediaPipe face mesh (optional)
     mesh_results = None
     if show_mesh:
         mesh_results = face_mesh.process(rgb_frame)
     
     recognized_count = 0
     
-    # Draw MediaPipe Face Mesh first (background)
+    # Draw face mesh (background layer)
     if show_mesh and mesh_results and mesh_results.multi_face_landmarks:
         for face_landmarks in mesh_results.multi_face_landmarks:
-            # Draw tesselation
+            # Tesselation
             mp_drawing.draw_landmarks(
                 image=frame,
                 landmark_list=face_landmarks,
@@ -104,7 +110,7 @@ def recognize_faces(frame, face_detection, face_mesh, show_mesh=True):
                 landmark_drawing_spec=None,
                 connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style())
             
-            # Draw contours
+            # Contours
             mp_drawing.draw_landmarks(
                 image=frame,
                 landmark_list=face_landmarks,
@@ -112,7 +118,7 @@ def recognize_faces(frame, face_detection, face_mesh, show_mesh=True):
                 landmark_drawing_spec=None,
                 connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_contours_style())
     
-    # Process detections for recognition
+    # Process face detections for recognition
     if detection_results.detections:
         for detection in detection_results.detections:
             # Get bounding box
@@ -129,32 +135,32 @@ def recognize_faces(frame, face_detection, face_mesh, show_mesh=True):
             w = min(frame_w - x, w + 2 * padding)
             h = min(frame_h - y, h + 2 * padding)
             
-            # Ensure valid crop
+            x2 = min(frame_w, x + w)
+            y2 = min(frame_h, y + h)
+            
             if w <= 0 or h <= 0:
                 continue
             
-            x2 = min(frame_w, x + w)
-            y2 = min(frame_h, y + h)
             face = frame[y:y2, x:x2]
             
             if face.size == 0:
                 continue
             
             try:
-                # Recognize face using LBPH
+                # Recognize using LBPH
                 name, confidence, is_recognized = recognize_face(face)
                 
-                # Choose color based on recognition
+                # Color based on recognition
                 if is_recognized:
-                    color = (0, 255, 0)  # Green for recognized
+                    color = (0, 255, 0)  # Green
                     recognized_count += 1
                 else:
-                    color = (0, 165, 255)  # Orange for unknown
+                    color = (0, 165, 255)  # Orange
                 
                 # Draw rectangle
                 cv2.rectangle(frame, (x, y), (x2, y2), color, 2)
                 
-                # Draw label background
+                # Draw label
                 label = f"{name} ({confidence:.1f})"
                 
                 (label_w, label_h), baseline = cv2.getTextSize(
@@ -189,7 +195,7 @@ if args.image:
         model_selection=1,
         min_detection_confidence=args.confidence
     ) as face_detection, mp_face_mesh.FaceMesh(
-        max_num_faces=3,
+        max_num_faces=5,
         refine_landmarks=True,
         min_detection_confidence=0.5,
         min_tracking_confidence=0.5
@@ -199,7 +205,7 @@ if args.image:
     cv2.putText(result, f"Recognized: {count}", (10, 30),
                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2, cv2.LINE_AA)
     
-    cv2.imshow(f"LBPH Recognition - {img_path.name}", result)
+    cv2.imshow(f"MediaPipe + LBPH Recognition", result)
     print(f"[INFO] Recognized {count} face(s)")
     print("[INFO] Press any key to close...")
     cv2.waitKey(0)
@@ -207,26 +213,47 @@ if args.image:
     sys.exit(0)
 
 # Webcam mode
-cap = cv2.VideoCapture(args.camera)
-if not cap.isOpened():
-    sys.exit("[ERROR] Could not open camera")
-
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
 print("\n" + "="*60)
 print("[INFO] Starting webcam recognition...")
-print(f"[INFO] Detection confidence: {args.confidence}")
-print(f"[INFO] Recognition threshold: {args.threshold:.1f} (lower = stricter)")
+print(f"[INFO] MediaPipe detection confidence: {args.confidence}")
+print(f"[INFO] LBPH recognition threshold: {args.threshold:.1f}")
 print(f"[INFO] Face mesh overlay: {'Enabled' if args.show_mesh else 'Disabled'}")
-print("[INFO] Press 'q' to quit")
+print("[INFO] Press 'q' to quit, 'm' to toggle mesh")
 print("="*60 + "\n")
+
+# Try to open camera
+print("[INFO] Opening camera...")
+cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)  # Windows-specific backend
+
+if not cap.isOpened():
+    print("[WARN] DSHOW backend failed, trying default...")
+    cap = cv2.VideoCapture(args.camera)
+
+if not cap.isOpened():
+    sys.exit("[ERROR] Could not open camera. Check permissions and camera connection.")
+
+# Set camera properties
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap.set(cv2.CAP_PROP_FPS, 30)
+
+# Verify camera is working
+ret, test_frame = cap.read()
+if not ret or test_frame is None:
+    cap.release()
+    sys.exit("[ERROR] Camera opened but cannot read frames. Check camera access.")
+
+print(f"[INFO] Camera opened successfully!")
+print(f"[INFO] Resolution: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
+
+show_mesh = args.show_mesh
+frame_count = 0
 
 with mp_face_detection.FaceDetection(
     model_selection=1,
     min_detection_confidence=args.confidence
 ) as face_detection, mp_face_mesh.FaceMesh(
-    max_num_faces=3,
+    max_num_faces=5,
     refine_landmarks=True,
     min_detection_confidence=0.5,
     min_tracking_confidence=0.5
@@ -235,17 +262,27 @@ with mp_face_detection.FaceDetection(
     fps = 0.0
     prev_time = time.time()
     
+    print("[INFO] Camera window should appear now...")
+    print("[INFO] If no window appears, check your display settings")
+    
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("[WARN] Failed to read frame")
+            print("[ERROR] Failed to read frame")
             break
+        
+        frame_count += 1
         
         # Mirror for natural view
         frame = cv2.flip(frame, 1)
         
         # Recognize faces
-        result, count = recognize_faces(frame, face_detection, face_mesh, show_mesh=args.show_mesh)
+        try:
+            result, count = recognize_faces(frame, face_detection, face_mesh, show_mesh=show_mesh)
+        except Exception as e:
+            print(f"[ERROR] Processing error: {e}")
+            result = frame
+            count = 0
         
         # Calculate FPS
         curr_time = time.time()
@@ -258,19 +295,28 @@ with mp_face_detection.FaceDetection(
         cv2.rectangle(overlay, (0, 0), (frame_w, 45), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.6, result, 0.4, 0, result)
         
-        hud = f"LBPH Recognition | Detected: {count}  |  FPS: {fps:.1f}  |  'q' to quit"
+        mesh_status = "ON" if show_mesh else "OFF"
+        hud = f"MediaPipe+LBPH | Recognized: {count} | FPS: {fps:.1f} | Mesh: {mesh_status} | 'q' quit, 'm' toggle"
         cv2.putText(result, hud, (10, 28),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
         
-        # Add algorithm branding
-        cv2.putText(result, "MediaPipe+LBPH", (frame_w - 180, 28),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2, cv2.LINE_AA)
-        
+        # Show frame
         cv2.imshow("MediaPipe + LBPH Face Recognition", result)
         
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        # First frame notification
+        if frame_count == 1:
+            print(f"[INFO] ✓ Window displayed! Frame size: {frame_w}x{frame_h}")
+        
+        # Handle key presses
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            print("\n[INFO] Quit key pressed")
             break
+        elif key == ord('m'):
+            show_mesh = not show_mesh
+            print(f"[INFO] Face mesh: {'Enabled' if show_mesh else 'Disabled'}")
 
 cap.release()
 cv2.destroyAllWindows()
 print("\n[INFO] Recognition stopped")
+print(f"[INFO] Total frames processed: {frame_count}")

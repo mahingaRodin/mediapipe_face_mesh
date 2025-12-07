@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+"""
+Train LBPH Face Recognition Model
+Uses pre-cropped faces from MediaPipe dataset collection
+"""
 import argparse
 import pickle
 import random
@@ -12,7 +16,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent
 MODELS = ROOT / "models"
 DATASET = ROOT / "dataset"
-MODEL_PKL = MODELS / "lbph_face_model.pkl"
+MODEL_YML = MODELS / "lbph_face_model.yml"
 LABEL_MAP_PKL = MODELS / "lbph_label_map.pkl"
 
 # CLI
@@ -30,7 +34,7 @@ ap.add_argument("--grid-y", type=int, default=8,
 args = ap.parse_args()
 
 def load_dataset(dataset_path):
-    """Load pre-cropped face images from dataset folders"""
+    """Load pre-cropped face images from MediaPipe dataset collection"""
     faces = []
     labels = []
     label_names = []
@@ -45,7 +49,7 @@ def load_dataset(dataset_path):
     if not person_dirs:
         print(f"[ERROR] No person folders found in {dataset_path}")
         print("[INFO] Expected structure: dataset/person_name/*.jpg")
-        return [], [], [], []
+        return [], [], [], [], {}
     
     # Create label mapping
     label_map = {person_dir.name: idx for idx, person_dir in enumerate(person_dirs)}
@@ -56,7 +60,6 @@ def load_dataset(dataset_path):
         print(f"[INFO] Processing {person_name} (label: {person_label})...")
         
         img_count = 0
-        # Load images for this person
         for img_path in sorted(person_dir.glob('*')):
             if img_path.suffix.lower() not in ['.jpg', '.jpeg', '.png']:
                 continue
@@ -64,13 +67,12 @@ def load_dataset(dataset_path):
             try:
                 img = cv2.imread(str(img_path))
                 if img is None or img.size == 0:
-                    print(f"[WARN] Could not read {img_path.name}")
                     continue
                 
                 # Convert to grayscale (LBPH works with grayscale)
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
                 
-                # Resize to standard size for consistency
+                # Resize to standard size
                 gray_resized = cv2.resize(gray, (160, 160))
                 
                 faces.append(gray_resized)
@@ -93,9 +95,12 @@ def train_lbph_model(faces, labels, label_names, label_map, val_split):
     n_classes = len(unique_labels)
     
     print(f"\n{'='*60}")
-    print(f"[INFO] LBPH FACE RECOGNITION")
-    print(f"[INFO] Training with {n_samples} samples")
+    print(f"[INFO] LBPH FACE RECOGNITION TRAINING")
+    print(f"[INFO] Total samples: {n_samples}")
     print(f"[INFO] Number of people: {n_classes}")
+    
+    if n_classes < 1:
+        raise SystemExit("[ERROR] No people found in dataset!")
     
     # Show label mapping
     print(f"\n[INFO] Label Mapping:")
@@ -156,14 +161,15 @@ def train_lbph_model(faces, labels, label_names, label_map, val_split):
         for idx in val_idx:
             face = faces[idx]
             true_label = labels[idx]
-            true_name = label_names[idx]
             
             # Predict
             pred_label, confidence = recognizer.predict(face)
             
             per_class_total[true_label] += 1
             
-            if pred_label == true_label:
+            # LBPH: lower confidence = better match
+            # Typical threshold: 50-70
+            if pred_label == true_label and confidence < 70:
                 correct += 1
                 per_class_correct[true_label] += 1
         
@@ -192,8 +198,9 @@ def main():
         print(f"\n[ERROR] Dataset folder not found: {DATASET}")
         print("\n[HELP] To create dataset:")
         print("  1. Run: python 01_create_dataset_mediapipe.py")
-        print("  2. Collect 50-100+ images per person")
-        print("  3. Run this script again")
+        print("  2. Collect data for person 1")
+        print("  3. Run again for person 2, 3, etc.")
+        print("  4. Run this training script")
         raise SystemExit()
     
     MODELS.mkdir(parents=True, exist_ok=True)
@@ -203,10 +210,6 @@ def main():
     
     if len(faces) == 0:
         print("\n[ERROR] No images loaded!")
-        print("\n[HELP] Troubleshooting:")
-        print("  1. Check: dataset/person_name/*.jpg exists")
-        print("  2. Verify images are readable")
-        print("  3. Run dataset collection again")
         raise SystemExit()
     
     # Train LBPH model
@@ -216,10 +219,10 @@ def main():
     print(f"\n[INFO] Saving models...")
     
     # Save LBPH recognizer
-    recognizer.write(str(MODEL_PKL))
-    print(f"  ✓ LBPH model saved: {MODEL_PKL}")
+    recognizer.write(str(MODEL_YML))
+    print(f"  ✓ LBPH model saved: {MODEL_YML}")
     
-    # Save label mapping (for converting predictions back to names)
+    # Save label mapping
     with open(LABEL_MAP_PKL, 'wb') as f:
         pickle.dump(label_map, f)
     print(f"  ✓ Label map saved: {LABEL_MAP_PKL}")
@@ -227,12 +230,13 @@ def main():
     print("\n" + "="*60)
     print("✓ TRAINING COMPLETE!")
     print("="*60)
-    print(f"Algorithm: LBPH (Local Binary Patterns Histograms)")
+    print(f"Technology: MediaPipe (detection) + LBPH (recognition)")
     print(f"Total samples: {len(faces)}")
     print(f"People: {', '.join(sorted(label_map.keys()))}")
     print("\n[NEXT STEPS]")
     print("  Webcam: python 04_predict_lbph_mediapipe.py")
     print("  Image:  python 04_predict_lbph_mediapipe.py --image photo.jpg")
+    print("  With mesh: python 04_predict_lbph_mediapipe.py --show-mesh")
     print("="*60 + "\n")
 
 if __name__ == "__main__":
